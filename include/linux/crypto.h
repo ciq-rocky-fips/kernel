@@ -1706,5 +1706,10 @@ static inline int crypto_comp_decompress(struct crypto_comp *tfm,
 						    src, slen, dst, dlen);
 }
 
+bool fips_request_failure(const char *driver,
+			  const char *algo_name,
+			  const char *test_name,
+			  unsigned bitsize,
+			  const char *test_mode);
 #endif	/* _LINUX_CRYPTO_H */
 
