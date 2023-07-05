@@ -1215,8 +1215,10 @@ out_nobuf:
 static int __test_skcipher(struct crypto_skcipher *tfm, int enc,
 			   const struct cipher_testvec *template,
 			   unsigned int tcount,
-			   const bool diff_dst, const int align_offset)
+			   const bool diff_dst, const int align_offset,
+			   const char *test_name)
 {
+	/* algo here is really the driver name. */
 	const char *algo =
 		crypto_tfm_alg_driver_name(crypto_skcipher_tfm(tfm));
 	unsigned int i, j, k, n, temp;
@@ -1233,12 +1235,32 @@ static int __test_skcipher(struct crypto_skcipher *tfm, int enc,
 	char *xoutbuf[XBUFSIZE];
 	int ret = -ENOMEM;
 	unsigned int ivsize = crypto_skcipher_ivsize(tfm);
+	const char *driver = algo;
+	const char *algo_name = crypto_tfm_alg_name(crypto_skcipher_tfm(tfm));
+	bool fips_logging_enabled = false;
+	bool fips_logging_thistime = false;
+	unsigned int *keysize_logged = NULL;
 
 	if (testmgr_alloc_buf(xbuf))
 		goto out_nobuf;
 
 	if (diff_dst && testmgr_alloc_buf(xoutbuf))
 		goto out_nooutbuf;
+
+	if (fips_enabled) {
+		/*
+		 * We only need to log one mode, where
+		 * diff_dst == false and align_offset == 0
+		 * otherwise we flood the logs.
+		 */
+		if (diff_dst == false && align_offset == 0) {
+			fips_logging_enabled = true;
+			keysize_logged = kcalloc(tcount, sizeof(unsigned int), GFP_KERNEL);
+			if (keysize_logged == NULL) {
+				goto out_nobuf;
+			}
+		}
+	}
 
 	if (diff_dst)
 		d = "-ddst";
@@ -1264,11 +1286,48 @@ static int __test_skcipher(struct crypto_skcipher *tfm, int enc,
 
 	j = 0;
 	for (i = 0; i < tcount; i++) {
+		bool xts_aes_test = (strcmp(test_name, "xts(aes)") == 0);
+		u8 badkey[64];
+		const u8 *key;
+
 		if (template[i].np && !template[i].also_non_np)
 			continue;
 
 		if (fips_enabled && template[i].fips_skip)
 			continue;
+
+		/* Only log for each new keysize. */
+		if (fips_logging_enabled) {
+			unsigned int ctr;
+			for (ctr = 0; keysize_logged[ctr] != 0 && ctr < tcount; ctr++) {
+				if (keysize_logged[ctr] == template[i].klen) {
+					/* We already logged this keysize. */
+					fips_logging_thistime = false;
+					break;
+				}
+			}
+			if (ctr == tcount) {
+				/* This can never happen. */
+				ret = -EINVAL;
+				goto out;
+			}
+			if (keysize_logged[ctr] == 0) {
+				/* Remember we are logging this keysize. */
+				keysize_logged[ctr] = template[i].klen;
+				fips_logging_thistime = true;
+			}
+		}
+
+		if (fips_logging_thistime) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:START\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name,
+				(unsigned)template[i].klen * 8,
+				e);
+		}
 
 		if (template[i].iv && !(template[i].generates_iv && enc))
 			memcpy(iv, template[i].iv, ivsize);
@@ -1286,19 +1345,80 @@ static int __test_skcipher(struct crypto_skcipher *tfm, int enc,
 		data += align_offset;
 		memcpy(data, input, template[i].len);
 
+		if (fips_logging_thistime) {
+			if (fips_request_failure(driver,
+						algo_name,
+						test_name,
+						(unsigned)template[i].klen * 8,
+						e)) {
+				/* Corrupt input. */
+				char *cp = (char *)data;
+				cp[0] ^= 1;
+			}
+		}
+
 		crypto_skcipher_clear_flags(tfm, ~0);
 		if (template[i].wk)
 			crypto_skcipher_set_flags(tfm,
 						  CRYPTO_TFM_REQ_WEAK_KEY);
 
-		ret = crypto_skcipher_setkey(tfm, template[i].key,
+		key = template[i].key;
+		if (fips_logging_thistime && xts_aes_test && (enc == ENCRYPT)) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:START\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				"duplicate_key",
+				(unsigned)template[i].klen * 8,
+				e);
+			if (fips_request_failure(driver,
+					algo_name,
+					"duplicate_key",
+					(unsigned)template[i].klen * 8,
+					e)) {
+				/* Max klen for XTS-AES-256 is 32 bytes. */
+				unsigned short keylen = template[i].klen;
+				if (keylen > sizeof(badkey)) {
+					ret = -EINVAL;
+					goto out;
+				}
+				/* Create a deliberate bad duplicate key. */
+				memcpy(badkey, template[i].key, keylen/2);
+				memcpy(&badkey[keylen/2], template[i].key, keylen/2);
+				key = badkey;
+			}
+		}
+
+		ret = crypto_skcipher_setkey(tfm, key,
 					     template[i].klen);
 		if (template[i].fail == !ret) {
+			if (fips_logging_thistime && xts_aes_test && (enc == ENCRYPT)) {
+				pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_FAIL\n",
+					__FILE__,
+					__LINE__,
+					driver,
+					algo_name,
+					"duplicate_key",
+					(unsigned)template[i].klen * 8,
+					e);
+			}
 			pr_err("alg: skcipher%s: setkey failed on test %d for %s: flags=%x\n",
 			       d, j, algo, crypto_skcipher_get_flags(tfm));
 			goto out;
 		} else if (ret)
 			continue;
+
+		if (fips_logging_thistime && xts_aes_test && (enc == ENCRYPT)) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_SUCCESS\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				"duplicate_key",
+				(unsigned)template[i].klen * 8,
+				e);
+		}
 
 		sg_init_one(&sg[0], data, template[i].len);
 		if (diff_dst) {
@@ -1320,6 +1440,16 @@ static int __test_skcipher(struct crypto_skcipher *tfm, int enc,
 
 		q = data;
 		if (memcmp(q, result, template[i].len)) {
+			if (fips_logging_thistime) {
+				pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_FAIL\n",
+					__FILE__,
+					__LINE__,
+					driver,
+					algo_name,
+					test_name,
+					(unsigned)template[i].klen * 8,
+					e);
+			}
 			pr_err("alg: skcipher%s: Test %d failed (invalid result) on %s for %s\n",
 			       d, j, e, algo);
 			hexdump(q, template[i].len);
@@ -1334,6 +1464,16 @@ static int __test_skcipher(struct crypto_skcipher *tfm, int enc,
 			hexdump(iv, crypto_skcipher_ivsize(tfm));
 			ret = -EINVAL;
 			goto out;
+		}
+		if (fips_logging_thistime) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_SUCCESS\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name,
+				(unsigned)template[i].klen * 8,
+				e);
 		}
 	}
 
@@ -1455,28 +1595,30 @@ out:
 out_nooutbuf:
 	testmgr_free_buf(xbuf);
 out_nobuf:
+	kfree(keysize_logged);
 	return ret;
 }
 
 static int test_skcipher(struct crypto_skcipher *tfm, int enc,
 			 const struct cipher_testvec *template,
-			 unsigned int tcount)
+			 unsigned int tcount,
+			 const char *test_name)
 {
 	unsigned int alignmask;
 	int ret;
 
 	/* test 'dst == src' case */
-	ret = __test_skcipher(tfm, enc, template, tcount, false, 0);
+	ret = __test_skcipher(tfm, enc, template, tcount, false, 0, test_name);
 	if (ret)
 		return ret;
 
 	/* test 'dst != src' case */
-	ret = __test_skcipher(tfm, enc, template, tcount, true, 0);
+	ret = __test_skcipher(tfm, enc, template, tcount, true, 0, test_name);
 	if (ret)
 		return ret;
 
 	/* test unaligned buffers, check with one byte offset */
-	ret = __test_skcipher(tfm, enc, template, tcount, true, 1);
+	ret = __test_skcipher(tfm, enc, template, tcount, true, 1, test_name);
 	if (ret)
 		return ret;
 
@@ -1484,7 +1626,7 @@ static int test_skcipher(struct crypto_skcipher *tfm, int enc,
 	if (alignmask) {
 		/* Check if alignment mask for tfm is correctly set. */
 		ret = __test_skcipher(tfm, enc, template, tcount, true,
-				      alignmask + 1);
+				      alignmask + 1, test_name);
 		if (ret)
 			return ret;
 	}
@@ -1894,9 +2036,9 @@ static int alg_test_skcipher(const struct alg_test_desc *desc,
 		return PTR_ERR(tfm);
 	}
 
-	err = test_skcipher(tfm, ENCRYPT, suite->vecs, suite->count);
+	err = test_skcipher(tfm, ENCRYPT, suite->vecs, suite->count, desc->alg);
 	if (!err)
-		err = test_skcipher(tfm, DECRYPT, suite->vecs, suite->count);
+		err = test_skcipher(tfm, DECRYPT, suite->vecs, suite->count, desc->alg);
 
 	crypto_free_skcipher(tfm);
 	return err;
