@@ -2271,7 +2271,9 @@ static int alg_test_kpp(const struct alg_test_desc *desc, const char *driver,
 }
 
 static int test_akcipher_one(struct crypto_akcipher *tfm,
-			     const struct akcipher_testvec *vecs)
+			     const struct akcipher_testvec *vecs,
+			     bool fips_logging,
+			     const char *test_name)
 {
 	char *xbuf[XBUFSIZE];
 	struct akcipher_request *req;
@@ -2281,6 +2283,9 @@ static int test_akcipher_one(struct crypto_akcipher *tfm,
 	unsigned int out_len_max, out_len = 0;
 	int err = -ENOMEM;
 	struct scatterlist src, dst, src_tab[2];
+	const char *driver = crypto_tfm_alg_driver_name(crypto_akcipher_tfm(tfm));
+	const char *algo_name = crypto_tfm_alg_name(crypto_akcipher_tfm(tfm));
+	const char *op_name = vecs->siggen_sigver_test ? "signing" : "encryption";
 
 	if (testmgr_alloc_buf(xbuf))
 		return err;
@@ -2311,6 +2316,26 @@ static int test_akcipher_one(struct crypto_akcipher *tfm,
 
 	memcpy(xbuf[0], vecs->m, vecs->m_size);
 
+	if (fips_logging) {
+		pr_info("%s:%d:FIPS.POST:%s:%s:%s_%s:START\n",
+			__FILE__,
+			__LINE__,
+			driver,
+			algo_name,
+			test_name,
+			op_name);
+	}
+
+	if (fips_logging &&
+		fips_request_failure(driver,
+				algo_name,
+				test_name,
+				0,
+				op_name)) {
+		char *cp = (char *)xbuf[0];
+		cp[0] ^= 1;
+	}
+
 	sg_init_table(src_tab, 2);
 	sg_set_buf(&src_tab[0], xbuf[0], 8);
 	sg_set_buf(&src_tab[1], xbuf[0] + 8, vecs->m_size - 8);
@@ -2336,11 +2361,31 @@ static int test_akcipher_one(struct crypto_akcipher *tfm,
 	}
 	/* verify that encrypted message is equal to expected */
 	if (memcmp(vecs->c, outbuf_enc, vecs->c_size)) {
+		if (fips_logging) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%s:END_FAIL\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name,
+				op_name);
+		}
 		pr_err("alg: akcipher: encrypt test failed. Invalid output\n");
 		hexdump(outbuf_enc, vecs->c_size);
 		err = -EINVAL;
 		goto free_all;
 	}
+
+	if (fips_logging) {
+		pr_info("%s:%d:FIPS.POST:%s:%s:%s_%s:END_SUCCESS\n",
+			__FILE__,
+			__LINE__,
+			driver,
+			algo_name,
+			test_name,
+			op_name);
+	}
+
 	/* Don't invoke decrypt for vectors with public key */
 	if (vecs->public_key_vec) {
 		err = 0;
@@ -2356,6 +2401,28 @@ static int test_akcipher_one(struct crypto_akcipher *tfm,
 		goto free_all;
 
 	memcpy(xbuf[0], vecs->c, vecs->c_size);
+
+	op_name = vecs->siggen_sigver_test ? "verify" : "decryption";
+
+	if (fips_logging) {
+		pr_info("%s:%d:FIPS.POST:%s:%s:%s_%s:START\n",
+			__FILE__,
+			__LINE__,
+			driver,
+			algo_name,
+			test_name,
+			op_name);
+	}
+
+	if (fips_logging &&
+		fips_request_failure(driver,
+				algo_name,
+				test_name,
+				0,
+				op_name)) {
+		char *cp = (char *)xbuf[0];
+		cp[0] ^= 1;
+	}
 
 	sg_init_one(&src, xbuf[0], vecs->c_size);
 	sg_init_one(&dst, outbuf_dec, out_len_max);
@@ -2382,10 +2449,30 @@ static int test_akcipher_one(struct crypto_akcipher *tfm,
 	if (memchr_inv(outbuf_dec, 0, out_len - vecs->m_size) ||
 	    memcmp(vecs->m, outbuf_dec + out_len - vecs->m_size,
 		   vecs->m_size)) {
+		if (fips_logging) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%s:END_FAIL\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name,
+				op_name);
+		}
 		pr_err("alg: akcipher: decrypt test failed. Invalid output\n");
 		hexdump(outbuf_dec, out_len);
 		err = -EINVAL;
 	}
+
+	if (fips_logging) {
+		pr_info("%s:%d:FIPS.POST:%s:%s:%s_%s:END_SUCCESS\n",
+			__FILE__,
+			__LINE__,
+			driver,
+			algo_name,
+			test_name,
+			op_name);
+	}
+
 free_all:
 	kfree(outbuf_dec);
 	kfree(outbuf_enc);
@@ -2403,9 +2490,12 @@ static int test_akcipher(struct crypto_akcipher *tfm, const char *alg,
 	const char *algo =
 		crypto_tfm_alg_driver_name(crypto_akcipher_tfm(tfm));
 	int ret, i;
+	bool fips_logging = fips_enabled;
 
 	for (i = 0; i < tcount; i++) {
-		ret = test_akcipher_one(tfm, vecs++);
+		ret = test_akcipher_one(tfm, vecs++, fips_logging, alg);
+		/* Only log the first vector. */
+		fips_logging = false;
 		if (!ret)
 			continue;
 
