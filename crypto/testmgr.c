@@ -639,8 +639,10 @@ static int test_hash(struct crypto_ahash *tfm,
 
 static int __test_aead(struct crypto_aead *tfm, int enc,
 		       const struct aead_testvec *template, unsigned int tcount,
-		       const bool diff_dst, const int align_offset)
+		       const bool diff_dst, const int align_offset,
+		       const char *test_name)
 {
+	/* algo here is really the driver name. */
 	const char *algo = crypto_tfm_alg_driver_name(crypto_aead_tfm(tfm));
 	unsigned int i, j, k, n, temp;
 	int ret = -ENOMEM;
@@ -659,6 +661,11 @@ static int __test_aead(struct crypto_aead *tfm, int enc,
 	char *xbuf[XBUFSIZE];
 	char *xoutbuf[XBUFSIZE];
 	char *axbuf[XBUFSIZE];
+	const char *driver = algo;
+	const char *algo_name = crypto_tfm_alg_name(crypto_aead_tfm(tfm));
+	bool fips_logging_enabled = false;
+	bool fips_logging_thistime = false;
+	unsigned int *keysize_logged = NULL;
 
 	iv = kzalloc(MAX_IVLEN, GFP_KERNEL);
 	if (!iv)
@@ -672,6 +679,21 @@ static int __test_aead(struct crypto_aead *tfm, int enc,
 		goto out_noaxbuf;
 	if (diff_dst && testmgr_alloc_buf(xoutbuf))
 		goto out_nooutbuf;
+
+	if (fips_enabled) {
+		/*
+		 * We only need to log one mode, where
+		 * diff_dst == false and align_offset == 0
+		 * otherwise we flood the logs.
+		 */
+		if (diff_dst == false && align_offset == 0) {
+			fips_logging_enabled = true;
+			keysize_logged = kcalloc(tcount, sizeof(unsigned int), GFP_KERNEL);
+			if (keysize_logged == NULL) {
+				goto out_noxbuf;
+			}
+		}
+	}
 
 	/* avoid "the frame size is larger than 1024 bytes" compiler warning */
 	sg = kmalloc(array3_size(sizeof(*sg), 8, (diff_dst ? 4 : 2)),
@@ -710,6 +732,39 @@ static int __test_aead(struct crypto_aead *tfm, int enc,
 
 		j++;
 
+		/* Only log for each new keysize. */
+		if (fips_logging_enabled) {
+			unsigned int ctr;
+			for (ctr = 0; keysize_logged[ctr] != 0 && ctr < tcount; ctr++) {
+				if (keysize_logged[ctr] == template[i].klen) {
+					/* We already logged this keysize. */
+					fips_logging_thistime = false;
+					break;
+				}
+			}
+			if (ctr == tcount) {
+				/* This can never happen. */
+				ret = -EINVAL;
+				goto out;
+			}
+			if (keysize_logged[ctr] == 0) {
+				/* Remember we are logging this keysize. */
+				keysize_logged[ctr] = template[i].klen;
+				fips_logging_thistime = true;
+			}
+		}
+
+		if (fips_logging_thistime) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:START\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name,
+				(unsigned)template[i].klen * 8,
+				e);
+		}
+
 		/* some templates have no input data but they will
 		 * touch input
 		 */
@@ -728,6 +783,27 @@ static int __test_aead(struct crypto_aead *tfm, int enc,
 			memcpy(iv, template[i].iv, iv_len);
 		else
 			memset(iv, 0, iv_len);
+
+		if (fips_logging_thistime) {
+			if (fips_request_failure(driver,
+						algo_name,
+						test_name,
+						(unsigned)template[i].klen * 8,
+						e)) {
+				char *cp;
+				if (template[i].ilen != 0) {
+					/* Corrupt input. */
+					cp = (char *)input;
+				} else if (template[i].alen != 0) {
+					/* Corrupt assoc. */
+					cp = (char *)assoc;
+				} else {
+					/* Corrupt IV. */
+					cp = (char *)iv;
+				}
+				cp[0] ^= 1;
+			}
+		}
 
 		crypto_aead_clear_flags(tfm, ~0);
 		if (template[i].wk)
@@ -807,11 +883,32 @@ static int __test_aead(struct crypto_aead *tfm, int enc,
 
 		q = output;
 		if (memcmp(q, template[i].result, template[i].rlen)) {
+			if (fips_logging_thistime) {
+				pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_FAIL\n",
+					__FILE__,
+					__LINE__,
+					driver,
+					algo_name,
+					test_name,
+					(unsigned)template[i].klen * 8,
+					e);
+			}
 			pr_err("alg: aead%s: Test %d failed on %s for %s\n",
 			       d, j, e, algo);
 			hexdump(q, template[i].rlen);
 			ret = -EINVAL;
 			goto out;
+		}
+
+		if (fips_logging_thistime) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_SUCCESS\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name,
+				(unsigned)template[i].klen * 8,
+				e);
 		}
 	}
 
@@ -1014,27 +1111,29 @@ out_noaxbuf:
 out_noxbuf:
 	kfree(key);
 	kfree(iv);
+	kfree(keysize_logged);
 	return ret;
 }
 
 static int test_aead(struct crypto_aead *tfm, int enc,
-		     const struct aead_testvec *template, unsigned int tcount)
+		     const struct aead_testvec *template, unsigned int tcount,
+		     const char *test_name)
 {
 	unsigned int alignmask;
 	int ret;
 
 	/* test 'dst == src' case */
-	ret = __test_aead(tfm, enc, template, tcount, false, 0);
+	ret = __test_aead(tfm, enc, template, tcount, false, 0, test_name);
 	if (ret)
 		return ret;
 
 	/* test 'dst != src' case */
-	ret = __test_aead(tfm, enc, template, tcount, true, 0);
+	ret = __test_aead(tfm, enc, template, tcount, true, 0, test_name);
 	if (ret)
 		return ret;
 
 	/* test unaligned buffers, check with one byte offset */
-	ret = __test_aead(tfm, enc, template, tcount, true, 1);
+	ret = __test_aead(tfm, enc, template, tcount, true, 1, test_name);
 	if (ret)
 		return ret;
 
@@ -1042,7 +1141,7 @@ static int test_aead(struct crypto_aead *tfm, int enc,
 	if (alignmask) {
 		/* Check if alignment mask for tfm is correctly set. */
 		ret = __test_aead(tfm, enc, template, tcount, true,
-				  alignmask + 1);
+				  alignmask + 1, test_name);
 		if (ret)
 			return ret;
 	}
@@ -1986,14 +2085,14 @@ static int alg_test_aead(const struct alg_test_desc *desc, const char *driver,
 
 	if (desc->suite.aead.enc.vecs) {
 		err = test_aead(tfm, ENCRYPT, desc->suite.aead.enc.vecs,
-				desc->suite.aead.enc.count);
+				desc->suite.aead.enc.count, desc->alg);
 		if (err)
 			goto out;
 	}
 
 	if (!err && desc->suite.aead.dec.vecs)
 		err = test_aead(tfm, DECRYPT, desc->suite.aead.dec.vecs,
-				desc->suite.aead.dec.count);
+				desc->suite.aead.dec.count, desc->alg);
 
 out:
 	crypto_free_aead(tfm);
