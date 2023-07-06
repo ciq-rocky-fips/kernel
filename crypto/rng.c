@@ -52,6 +52,11 @@ int crypto_rng_reset(struct crypto_rng *tfm, const u8 *seed, unsigned int slen)
 		seed = buf;
 	}
 
+	if (fail_drbg(tfm->base.__crt_alg, "reset")) {
+		err = -EINVAL;
+		goto out;
+	}
+
 	err = crypto_rng_alg(tfm)->seed(tfm, seed, slen);
 out:
 	kfree_sensitive(buf);
