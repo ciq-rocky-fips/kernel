@@ -690,5 +690,15 @@ bool fips_request_failure(const char *driver,
 }
 EXPORT_SYMBOL_GPL(fips_request_failure);
 
+bool fail_drbg(const struct crypto_alg *alg, const char *operation)
+{
+	return fips_request_failure(alg->cra_driver_name,
+				    alg->cra_name,
+				    operation,
+				    0,
+				    "");
+}
+EXPORT_SYMBOL_GPL(fail_drbg);
+
 MODULE_DESCRIPTION("Cryptographic core API");
 MODULE_LICENSE("GPL");
