@@ -2309,13 +2309,17 @@ static int alg_test_cprng(const struct alg_test_desc *desc, const char *driver,
 
 
 static int drbg_cavs_test(const struct drbg_testvec *test, int pr,
-			  const char *driver, u32 type, u32 mask)
+			  const char *driver, u32 type, u32 mask,
+			  const char *test_name,
+			  bool fips_logging)
 {
 	int ret = -EAGAIN;
 	struct crypto_rng *drng;
 	struct drbg_test_data test_data;
 	struct drbg_string addtl, pers, testentropy;
 	unsigned char *buf = kzalloc(test->expectedlen, GFP_KERNEL);
+	const char *algo_name = NULL;
+	unsigned char corrupted_entropy[64];
 
 	if (!buf)
 		return -ENOMEM;
@@ -2328,8 +2332,33 @@ static int drbg_cavs_test(const struct drbg_testvec *test, int pr,
 		return -ENOMEM;
 	}
 
+	algo_name = crypto_tfm_alg_name(&drng->base);
+
+	if (fips_logging) {
+		pr_info("%s:%d:FIPS.POST:%s:%s:%s:START\n",
+			__FILE__,
+			__LINE__,
+			driver,
+			algo_name,
+			test_name);
+	}
+
 	test_data.testentropy = &testentropy;
-	drbg_string_fill(&testentropy, test->entropy, test->entropylen);
+	if (fips_request_failure(driver,
+				 algo_name,
+				 test_name,
+				 0,
+				 "drbg_expected_out")) {
+		if (test->entropylen > sizeof(corrupted_entropy)) {
+			ret = -EINVAL;
+			goto outbuf;
+		}
+		memcpy(corrupted_entropy, test->entropy, test->entropylen);
+		corrupted_entropy[0] ^= 0x1;
+		drbg_string_fill(&testentropy, corrupted_entropy, test->entropylen);
+	} else {
+		drbg_string_fill(&testentropy, test->entropy, test->entropylen);
+	}
 	drbg_string_fill(&pers, test->pers, test->perslen);
 	ret = crypto_drbg_reset_test(drng, &pers, &test_data);
 	if (ret) {
@@ -2370,6 +2399,23 @@ static int drbg_cavs_test(const struct drbg_testvec *test, int pr,
 	ret = memcmp(test->expected, buf, test->expectedlen);
 
 outbuf:
+	if (fips_logging) {
+		if (ret == 0) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s:END_SUCCESS\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name);
+		} else {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s:END_FAIL\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name);
+		}
+	}
 	crypto_free_rng(drng);
 	kfree_sensitive(buf);
 	return ret;
@@ -2389,7 +2435,7 @@ static int alg_test_drbg(const struct alg_test_desc *desc, const char *driver,
 		pr = 1;
 
 	for (i = 0; i < tcount; i++) {
-		err = drbg_cavs_test(&template[i], pr, driver, type, mask);
+		err = drbg_cavs_test(&template[i], pr, driver, type, mask, desc->alg, fips_enabled ? (i == 0) : false);
 		if (err) {
 			printk(KERN_ERR "alg: drbg: Test %d failed for %s\n",
 			       i, driver);
