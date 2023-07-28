@@ -141,6 +141,16 @@ static inline int crypto_rng_generate(struct crypto_rng *tfm,
 				      u8 *dst, unsigned int dlen)
 {
 	if (fail_drbg(tfm->base.__crt_alg, "generate")) {
+		pr_info("%s:%d:FIPS.POST:%s:%s:%s:END_FAIL\n",
+			__FILE__,
+			__LINE__,
+			tfm->base.__crt_alg->cra_driver_name,
+			tfm->base.__crt_alg->cra_name,
+			"generate");
+		panic("FIPS.POST request failure in crypto_rng_generate: %s:%s:%s\n",
+			tfm->base.__crt_alg->cra_driver_name,
+			tfm->base.__crt_alg->cra_name,
+			"generate");
 		return -EINVAL;
 	}
 	return crypto_rng_alg(tfm)->generate(tfm, src, slen, dst, dlen);
