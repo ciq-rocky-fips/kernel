@@ -1,0 +1,14 @@
+SRC-GIT repository for the FIPS kernels.
+
+The actual kernels are maintained in separate branches:
+
+FIPS-8:    Production FIPS kernel for Rocky 8.
+           Based on linux-4.18.0-425.13.1.el8_7
+
+FIPS-FT-8: Functional test kernel for Rocky 8.
+           Based on linux-4.18.0-425.13.1.el8_7
+	   This kernel is only intended for funcitonal testing
+	   of the fips functionality and not to be used in production.
+	   This branch is a set of 15 commits based ontop of FIPS-8 and is
+	   not supposed to be updated manually. Instead it should be rebased
+	   ontop of FIPS-8 anytime FIPS-8 changes.
