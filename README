@@ -12,3 +12,7 @@ FIPS-FT-8: Functional test kernel for Rocky 8.
 	   This branch is a set of 15 commits based ontop of FIPS-8 and is
 	   not supposed to be updated manually. Instead it should be rebased
 	   ontop of FIPS-8 anytime FIPS-8 changes.
+
+FIPS-9:    Production FIPS kernel for Rocky 9.
+           Based on linux-5.14.0-284.30.1.el9_2
+
