@@ -21,6 +21,8 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/completion.h>
+#include <linux/fips.h>
+#include <asm/cmdline.h>
 #include "internal.h"
 
 LIST_HEAD(crypto_alg_list);
@@ -655,6 +657,83 @@ void crypto_req_done(struct crypto_async_request *req, int err)
 	complete(&wait->completion);
 }
 EXPORT_SYMBOL_GPL(crypto_req_done);
+
+bool fips_request_failure(const char *driver,
+			  const char *algo_name,
+			  const char *test_name,
+			  unsigned bitsize,
+			  const char *test_mode)
+{
+	size_t d_len = strlen(driver);
+	size_t a_len = strlen(algo_name);
+	size_t t_len = strlen(test_name);
+	size_t m_len = strlen(test_mode);
+	size_t len_needed = strlen("fips_fail:") + 5; /* 4 separator characters + terminating NULL */
+	char *fail_param;
+	bool ret = false;
+
+	if (!fips_enabled) {
+		return false;
+	}
+	if (len_needed + d_len < len_needed) {
+		panic("%s:%d Integer wrap\n", __FILE__, __LINE__);
+	}
+	len_needed += d_len;
+	if (len_needed + a_len < len_needed) {
+		panic("%s:%d Integer wrap\n", __FILE__, __LINE__);
+	}
+	len_needed += a_len;
+	if (len_needed + t_len < len_needed) {
+		panic("%s:%d Integer wrap\n", __FILE__, __LINE__);
+	}
+	len_needed += t_len;
+	if (len_needed + m_len < len_needed) {
+		panic("%s:%d Integer wrap\n", __FILE__, __LINE__);
+	}
+	len_needed += m_len;
+	if (bitsize != 0) {
+		/* 22 is enough for any 64-bit number as text. */
+		if (len_needed + 22 < len_needed) {
+			panic("%s:%d Integer wrap\n", __FILE__, __LINE__);
+		}
+		len_needed += 22;
+	}
+
+	fail_param = kmalloc(len_needed, GFP_KERNEL);
+	if (fail_param == NULL) {
+		panic("%s:%u fips allocation fail\n", __FILE__, __LINE__);
+	}
+	if (bitsize != 0) {
+		snprintf(fail_param,
+			 len_needed,
+			 "fips_fail:%s:%s:%s_%u_%s",
+			 driver,
+			 algo_name,
+			 test_name,
+			 bitsize,
+			 test_mode);
+	} else {
+		snprintf(fail_param,
+			 len_needed,
+			 "fips_fail:%s:%s:%s_%s",
+			 driver,
+			 algo_name,
+			 test_name,
+			 test_mode);
+	}
+	if (test_mode[0] == '\0') {
+		/* Remove trailing '_' */
+		fail_param[strlen(fail_param)-1] = '\0';
+	}
+
+	if (cmdline_find_option_bool(saved_command_line, fail_param)) {
+		pr_info("FIPS REQUEST FAIL: %s\n", fail_param);
+		ret = true;
+	}
+	kfree(fail_param);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(fips_request_failure);
 
 MODULE_DESCRIPTION("Cryptographic core API");
 MODULE_LICENSE("GPL");
