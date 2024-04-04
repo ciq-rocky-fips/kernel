@@ -2601,8 +2601,10 @@ out:
 
 static int test_cipher(struct crypto_cipher *tfm, int enc,
 		       const struct cipher_testvec *template,
-		       unsigned int tcount)
+		       unsigned int tcount,
+		       const char *test_name)
 {
+	/* algo here is really the driver name. */
 	const char *algo = crypto_tfm_alg_driver_name(crypto_cipher_tfm(tfm));
 	unsigned int i, j, k;
 	char *q;
@@ -2611,6 +2613,11 @@ static int test_cipher(struct crypto_cipher *tfm, int enc,
 	void *data;
 	char *xbuf[XBUFSIZE];
 	int ret = -ENOMEM;
+	const char *driver = algo;
+	const char *algo_name = crypto_tfm_alg_name(crypto_cipher_tfm(tfm));
+	bool fips_logging_enabled = false;
+	bool fips_logging_thistime = false;
+	unsigned int *keysize_logged = NULL;
 
 	if (testmgr_alloc_buf(xbuf))
 		goto out_nobuf;
@@ -2620,11 +2627,52 @@ static int test_cipher(struct crypto_cipher *tfm, int enc,
 	else
 		e = "decryption";
 
+	if (fips_enabled) {
+		keysize_logged = kcalloc(tcount, sizeof(unsigned int), GFP_KERNEL);
+		if (keysize_logged == NULL) {
+			goto out_nobuf;
+		}
+		fips_logging_enabled = true;
+	}
+
 	j = 0;
 	for (i = 0; i < tcount; i++) {
 
 		if (fips_enabled && template[i].fips_skip)
 			continue;
+
+		/* Only log for each new keysize. */
+		if (fips_logging_enabled) {
+			unsigned int ctr;
+			for (ctr = 0; keysize_logged[ctr] != 0 && ctr < tcount; ctr++) {
+				if (keysize_logged[ctr] == template[i].klen) {
+					/* We already logged this keysize. */
+					fips_logging_thistime = false;
+					break;
+				}
+			}
+			if (ctr == tcount) {
+				/* This can never happen. */
+				ret = -EINVAL;
+				goto out;
+			}
+			if (keysize_logged[ctr] == 0) {
+				/* Remember we are logging this keysize. */
+				keysize_logged[ctr] = template[i].klen;
+				fips_logging_thistime = true;
+			}
+		}
+
+		if (fips_logging_thistime) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:START\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name,
+				(unsigned)template[i].klen * 8,
+				e);
+		}
 
 		input  = enc ? template[i].ptext : template[i].ctext;
 		result = enc ? template[i].ctext : template[i].ptext;
@@ -2636,6 +2684,14 @@ static int test_cipher(struct crypto_cipher *tfm, int enc,
 
 		data = xbuf[0];
 		memcpy(data, input, template[i].len);
+
+		if (fips_logging_thistime && fips_request_failure(driver,
+				algo_name,
+				test_name,
+				(unsigned)template[i].klen * 8,
+				e)) {
+			xbuf[0][0] ^= 1;
+		}
 
 		crypto_cipher_clear_flags(tfm, ~0);
 		if (template[i].wk)
@@ -2670,12 +2726,35 @@ static int test_cipher(struct crypto_cipher *tfm, int enc,
 
 		q = data;
 		if (memcmp(q, result, template[i].len)) {
+			if (fips_logging_thistime) {
+				pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_FAIL\n",
+					__FILE__,
+					__LINE__,
+					driver,
+					algo_name,
+					test_name,
+					(unsigned)template[i].klen * 8,
+					e);
+			}
+
 			printk(KERN_ERR "alg: cipher: Test %d failed "
 			       "on %s for %s\n", j, e, algo);
 			hexdump(q, template[i].len);
 			ret = -EINVAL;
 			goto out;
 		}
+
+		if (fips_logging_thistime) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_SUCCESS\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name,
+				(unsigned)template[i].klen * 8,
+				e);
+		}
+
 	}
 
 	ret = 0;
@@ -2683,6 +2762,7 @@ static int test_cipher(struct crypto_cipher *tfm, int enc,
 out:
 	testmgr_free_buf(xbuf);
 out_nobuf:
+	kfree(keysize_logged);
 	return ret;
 }
 
@@ -3518,9 +3598,9 @@ static int alg_test_cipher(const struct alg_test_desc *desc,
 		return PTR_ERR(tfm);
 	}
 
-	err = test_cipher(tfm, ENCRYPT, suite->vecs, suite->count);
+	err = test_cipher(tfm, ENCRYPT, suite->vecs, suite->count, desc->alg);
 	if (!err)
-		err = test_cipher(tfm, DECRYPT, suite->vecs, suite->count);
+		err = test_cipher(tfm, DECRYPT, suite->vecs, suite->count, desc->alg);
 
 	crypto_free_cipher(tfm);
 	return err;
