@@ -2847,11 +2847,14 @@ static int test_skcipher_vec_cfg(int enc, const struct cipher_testvec *vec,
 				 const char *vec_name,
 				 const struct testvec_config *cfg,
 				 struct skcipher_request *req,
-				 struct cipher_test_sglists *tsgls)
+				 struct cipher_test_sglists *tsgls,
+				 bool xts_aes_test,
+				 bool fips_logging_thistime)
 {
 	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
 	const unsigned int alignmask = crypto_skcipher_alignmask(tfm);
 	const unsigned int ivsize = crypto_skcipher_ivsize(tfm);
+	const char *algo_name = crypto_tfm_alg_name(crypto_skcipher_tfm(tfm));
 	const char *driver = crypto_skcipher_driver_name(tfm);
 	const u32 req_flags = CRYPTO_TFM_REQ_MAY_BACKLOG | cfg->req_flags;
 	const char *op = enc ? "encryption" : "decryption";
@@ -2862,6 +2865,8 @@ static int test_skcipher_vec_cfg(int enc, const struct cipher_testvec *vec,
 		 (cfg->iv_offset_relative_to_alignmask ? alignmask : 0);
 	struct kvec input;
 	int err;
+	u8 badkey[64];
+	const u8 *key;
 
 	/* Set the key */
 	if (vec->wk)
@@ -2869,16 +2874,64 @@ static int test_skcipher_vec_cfg(int enc, const struct cipher_testvec *vec,
 	else
 		crypto_skcipher_clear_flags(tfm,
 					    CRYPTO_TFM_REQ_FORBID_WEAK_KEYS);
-	err = do_setkey(crypto_skcipher_setkey, tfm, vec->key, vec->klen,
+	key = vec->key;
+	if (fips_logging_thistime && xts_aes_test && (enc == ENCRYPT)) {
+		pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:START\n",
+			__FILE__,
+			__LINE__,
+			driver,
+			algo_name,
+			"duplicate_key",
+			(unsigned)vec->klen * 8,
+			op);
+		if (fips_request_failure(driver,
+				algo_name,
+				"duplicate_key",
+				(unsigned)vec->klen * 8,
+				op)) {
+			/* Max klen for XTS-AES-256 is 32 bytes. */
+			unsigned short keylen = vec->klen;
+			if (keylen > sizeof(badkey)) {
+				return -EINVAL;
+			}
+			/* Create a deliberate bad duplicate key. */
+			memcpy(badkey, vec->key, keylen/2);
+			memcpy(&badkey[keylen/2], vec->key, keylen/2);
+			key = badkey;
+		}
+	}
+
+	err = do_setkey(crypto_skcipher_setkey, tfm, key, vec->klen,
 			cfg, alignmask);
 	if (err) {
 		if (err == vec->setkey_error)
 			return 0;
+		if (fips_logging_thistime && xts_aes_test && (enc == ENCRYPT)) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_FAIL\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				"duplicate_key",
+				(unsigned)vec->klen * 8,
+				op);
+		}
 		pr_err("alg: skcipher: %s setkey failed on test vector %s; expected_error=%d, actual_error=%d, flags=%#x\n",
 		       driver, vec_name, vec->setkey_error, err,
 		       crypto_skcipher_get_flags(tfm));
 		return err;
 	}
+	if (fips_logging_thistime && xts_aes_test && (enc == ENCRYPT)) {
+		pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_SUCCESS\n",
+			__FILE__,
+			__LINE__,
+			driver,
+			algo_name,
+			"duplicate_key",
+			(unsigned)vec->klen * 8,
+			op);
+	}
+
 	if (vec->setkey_error) {
 		pr_err("alg: skcipher: %s setkey unexpectedly succeeded on test vector %s; expected_error=%d\n",
 		       driver, vec_name, vec->setkey_error);
@@ -3010,12 +3063,14 @@ static int test_skcipher_vec_cfg(int enc, const struct cipher_testvec *vec,
 static int test_skcipher_vec(int enc, const struct cipher_testvec *vec,
 			     unsigned int vec_num,
 			     struct skcipher_request *req,
-			     struct cipher_test_sglists *tsgls)
+			     struct cipher_test_sglists *tsgls,
+			     bool xts_aes_test,
+			     bool fips_logging_thistime)
 {
 	char vec_name[16];
 	unsigned int i;
 	int err;
-
+	
 	if (fips_enabled && vec->fips_skip)
 		return 0;
 
@@ -3024,7 +3079,7 @@ static int test_skcipher_vec(int enc, const struct cipher_testvec *vec,
 	for (i = 0; i < ARRAY_SIZE(default_cipher_testvec_configs); i++) {
 		err = test_skcipher_vec_cfg(enc, vec, vec_name,
 					    &default_cipher_testvec_configs[i],
-					    req, tsgls);
+					    req, tsgls, xts_aes_test, fips_logging_thistime);
 		if (err)
 			return err;
 	}
@@ -3038,7 +3093,7 @@ static int test_skcipher_vec(int enc, const struct cipher_testvec *vec,
 			generate_random_testvec_config(&cfg, cfgname,
 						       sizeof(cfgname));
 			err = test_skcipher_vec_cfg(enc, vec, vec_name,
-						    &cfg, req, tsgls);
+						    &cfg, req, tsgls, 0, 0);
 			if (err)
 				return err;
 			cond_resched();
@@ -3225,11 +3280,11 @@ static int test_skcipher_vs_generic_impl(const char *generic_driver,
 		generate_random_testvec_config(cfg, cfgname, sizeof(cfgname));
 
 		err = test_skcipher_vec_cfg(ENCRYPT, &vec, vec_name,
-					    cfg, req, tsgls);
+					    cfg, req, tsgls, 0, 0);
 		if (err)
 			goto out;
 		err = test_skcipher_vec_cfg(DECRYPT, &vec, vec_name,
-					    cfg, req, tsgls);
+					    cfg, req, tsgls, 0, 0);
 		if (err)
 			goto out;
 		cond_resched();
@@ -3256,17 +3311,101 @@ static int test_skcipher_vs_generic_impl(const char *generic_driver,
 
 static int test_skcipher(int enc, const struct cipher_test_suite *suite,
 			 struct skcipher_request *req,
-			 struct cipher_test_sglists *tsgls)
+			 struct cipher_test_sglists *tsgls,
+			 const char *test_name)
 {
 	unsigned int i;
 	int err;
+	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
+	const char *driver = crypto_skcipher_driver_name(tfm);
+	/* algo here is really the driver name. */
+	const char *algo_name = crypto_tfm_alg_name(crypto_skcipher_tfm(tfm));
+	bool fips_logging_enabled = true;
+	bool fips_logging_thistime = false;
+	unsigned int *keysize_logged = NULL;
+	const char *e = (enc == ENCRYPT) ? "encryption" : "decryption";
+	  
+	keysize_logged = kcalloc(suite->count, sizeof(unsigned int), GFP_KERNEL);
+	if (keysize_logged == NULL) {
+		return -ENOMEM;
+	}
 
 	for (i = 0; i < suite->count; i++) {
-		err = test_skcipher_vec(enc, &suite->vecs[i], i, req, tsgls);
-		if (err)
+		bool xts_aes_test = (strcmp(test_name, "xts(aes)") == 0);
+
+		/* Only log for each new keysize. */
+		if (fips_logging_enabled) {
+			unsigned int ctr;
+			for (ctr = 0; keysize_logged[ctr] != 0 && ctr < suite->count; ctr++) {
+			  
+				if (keysize_logged[ctr] == suite->vecs[i].klen) {
+					/* We already logged this keysize. */
+					fips_logging_thistime = false;
+					break;
+				}
+			}
+			if (ctr == suite->count) {
+				/* This can never happen. */
+				return -EINVAL;
+			}
+			if (keysize_logged[ctr] == 0) {
+				/* Remember we are logging this keysize. */
+				keysize_logged[ctr] = suite->vecs[i].klen;
+				fips_logging_thistime = true;
+			}
+		}
+
+		if (fips_logging_thistime) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:START\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name,
+				(unsigned)suite->vecs[i].klen * 8,
+				e);
+		}
+
+		if (fips_logging_thistime) {
+			if (fips_request_failure(driver,
+						algo_name,
+						test_name,
+						(unsigned)suite->vecs[i].klen * 8,
+						e)) {
+				/* Corrupt input. */
+				char *cp = (char *)suite->vecs[i].ptext;
+				cp[0] ^= 1;
+			}
+		}
+
+		err = test_skcipher_vec(enc, &suite->vecs[i], i, req, tsgls,
+					xts_aes_test, fips_logging_thistime);
+		if (err) {
+			if (fips_logging_thistime) {
+				pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_FAIL\n",
+					__FILE__,
+					__LINE__,
+					driver,
+					algo_name,
+					test_name,
+					(unsigned)suite->vecs[i].klen * 8,
+					e);
+			}
 			return err;
+		}
+		if (fips_logging_thistime) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_SUCCESS\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name,
+				(unsigned)suite->vecs[i].klen * 8,
+				e);
+		}
 		cond_resched();
 	}
+	kfree(keysize_logged);
 	return 0;
 }
 
@@ -3274,6 +3413,7 @@ static int alg_test_skcipher(const struct alg_test_desc *desc,
 			     const char *driver, u32 type, u32 mask)
 {
 	const struct cipher_test_suite *suite = &desc->suite.cipher;
+	const char *test_name = desc->alg;
 	struct crypto_skcipher *tfm;
 	struct skcipher_request *req = NULL;
 	struct cipher_test_sglists *tsgls = NULL;
@@ -3308,11 +3448,11 @@ static int alg_test_skcipher(const struct alg_test_desc *desc,
 		goto out;
 	}
 
-	err = test_skcipher(ENCRYPT, suite, req, tsgls);
+	err = test_skcipher(ENCRYPT, suite, req, tsgls, test_name);
 	if (err)
 		goto out;
 
-	err = test_skcipher(DECRYPT, suite, req, tsgls);
+	err = test_skcipher(DECRYPT, suite, req, tsgls, test_name);
 	if (err)
 		goto out;
 
