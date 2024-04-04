@@ -780,5 +780,7 @@ bool fips_request_failure(const char *driver,
 			  const char *test_name,
 			  unsigned bitsize,
 			  const char *test_mode);
+
+bool fail_drbg(const struct crypto_alg *alg, const char *operation);
 #endif	/* _LINUX_CRYPTO_H */
 
