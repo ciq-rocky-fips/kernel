@@ -35,6 +35,7 @@
 #include <crypto/acompress.h>
 #include <crypto/internal/cipher.h>
 #include <crypto/internal/simd.h>
+#include <crypto/internal/kpp.h>
 
 #include "internal.h"
 
@@ -1358,13 +1359,15 @@ static int test_ahash_vec_cfg(const struct hash_testvec *vec,
 			      const struct testvec_config *cfg,
 			      struct ahash_request *req,
 			      struct test_sglist *tsgl,
-			      u8 *hashstate)
+			      u8 *hashstate,
+			      const char *test_name)
 {
 	struct crypto_ahash *tfm = crypto_ahash_reqtfm(req);
 	const unsigned int alignmask = crypto_ahash_alignmask(tfm);
 	const unsigned int digestsize = crypto_ahash_digestsize(tfm);
 	const unsigned int statesize = crypto_ahash_statesize(tfm);
 	const char *driver = crypto_ahash_driver_name(tfm);
+	const char *algo_name = crypto_ahash_alg_name(tfm);
 	const u32 req_flags = CRYPTO_TFM_REQ_MAY_BACKLOG | cfg->req_flags;
 	const struct test_sg_division *divs[XBUFSIZE];
 	DECLARE_CRYPTO_WAIT(wait);
@@ -1373,6 +1376,50 @@ static int test_ahash_vec_cfg(const struct hash_testvec *vec,
 	unsigned int pending_len;
 	u8 result[HASH_MAX_DIGESTSIZE + TESTMGR_POISON_LEN];
 	int err;
+	bool fips_logging = false;
+
+	//qqq only check first vector
+	if (fips_enabled && cfg->finalization_type == FINALIZATION_TYPE_DIGEST) {
+		/*
+		 * We only need to log one mode, where
+		 * align_offset == 0 and use_digest == true
+		 * otherwise we flood the logs.
+		 */
+		/* Don't log pure checksum algorithms. */
+		if (strcmp(test_name, "crc32") == 0 ||
+				strcmp(test_name, "crc32c") == 0 ||
+				strcmp(test_name, "crct10dif") == 0) {
+			fips_logging = false;
+		} else {
+			fips_logging = true;
+		}
+	}
+
+	if (fips_logging && vec->psize > 0) {
+		/*
+		 * Log the first vector entry with a non-zero
+		 * plaintext. That way we can corrupt it if
+		 * requested and log a failure.
+		 */
+		pr_info("%s:%d:FIPS.POST:%s:%s:%s:START\n",
+			__FILE__,
+			__LINE__,
+			driver,
+			algo_name,
+			test_name);
+	}
+
+	if (fips_logging && vec->psize > 0) {
+		if (fips_request_failure(driver,
+					 algo_name,
+					 test_name,
+					 0,
+					 "hash")) {
+			/* Corrupt input. */
+			char *cp = (char *)vec->plaintext;
+			cp[0] ^= 1;
+		}
+	}
 
 	/* Set the key, if specified */
 	if (vec->ksize) {
@@ -1393,6 +1440,7 @@ static int test_ahash_vec_cfg(const struct hash_testvec *vec,
 		}
 	}
 
+	
 	/* Build the scatterlist for the source data */
 	err = build_hash_sglist(tsgl, vec, cfg, alignmask, divs);
 	if (err) {
@@ -1414,17 +1462,42 @@ static int test_ahash_vec_cfg(const struct hash_testvec *vec,
 		ahash_request_set_crypt(req, tsgl->sgl, result, vec->psize);
 		err = do_ahash_op(crypto_ahash_digest, req, &wait, cfg->nosimd);
 		if (err) {
-			if (err == vec->digest_error)
+			if (err == vec->digest_error) {
+				if (fips_logging && vec->psize > 0) {
+					pr_info("%s:%d:FIPS.POST:%s:%s:%s:END_SUCCESS\n",
+						__FILE__,
+						__LINE__,
+						driver,
+						algo_name,
+						test_name);
+				}
 				return 0;
+			}
 			pr_err("alg: ahash: %s digest() failed on test vector %s; expected_error=%d, actual_error=%d, cfg=\"%s\"\n",
 			       driver, vec_name, vec->digest_error, err,
 			       cfg->name);
+			if (fips_logging && vec->psize > 0) {
+				pr_info("%s:%d:FIPS.POST:%s:%s:%s:END_FAIL\n",
+					__FILE__,
+					__LINE__,
+					driver,
+					algo_name,
+					test_name);
+			}
 			return err;
 		}
 		if (vec->digest_error) {
 			pr_err("alg: ahash: %s digest() unexpectedly succeeded on test vector %s; expected_error=%d, cfg=\"%s\"\n",
 			       driver, vec_name, vec->digest_error, cfg->name);
 			return -EINVAL;
+		}
+		if (fips_logging && vec->psize > 0) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s:END_SUCCESS\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name);
 		}
 		goto result_ready;
 	}
@@ -1525,7 +1598,8 @@ static int test_hash_vec_cfg(const struct hash_testvec *vec,
 			     struct ahash_request *req,
 			     struct shash_desc *desc,
 			     struct test_sglist *tsgl,
-			     u8 *hashstate)
+			     u8 *hashstate,
+			     const char *test_name)
 {
 	int err;
 
@@ -1542,12 +1616,13 @@ static int test_hash_vec_cfg(const struct hash_testvec *vec,
 			return err;
 	}
 
-	return test_ahash_vec_cfg(vec, vec_name, cfg, req, tsgl, hashstate);
+	return test_ahash_vec_cfg(vec, vec_name, cfg, req, tsgl, hashstate, test_name);
 }
 
 static int test_hash_vec(const struct hash_testvec *vec, unsigned int vec_num,
 			 struct ahash_request *req, struct shash_desc *desc,
-			 struct test_sglist *tsgl, u8 *hashstate)
+			 struct test_sglist *tsgl, u8 *hashstate,
+			 const char *test_name)
 {
 	char vec_name[16];
 	unsigned int i;
@@ -1558,7 +1633,7 @@ static int test_hash_vec(const struct hash_testvec *vec, unsigned int vec_num,
 	for (i = 0; i < ARRAY_SIZE(default_hash_testvec_configs); i++) {
 		err = test_hash_vec_cfg(vec, vec_name,
 					&default_hash_testvec_configs[i],
-					req, desc, tsgl, hashstate);
+					req, desc, tsgl, hashstate, test_name);
 		if (err)
 			return err;
 	}
@@ -1572,7 +1647,7 @@ static int test_hash_vec(const struct hash_testvec *vec, unsigned int vec_num,
 			generate_random_testvec_config(&cfg, cfgname,
 						       sizeof(cfgname));
 			err = test_hash_vec_cfg(vec, vec_name, &cfg,
-						req, desc, tsgl, hashstate);
+						req, desc, tsgl, hashstate, test_name);
 			if (err)
 				return err;
 			cond_resched();
@@ -1728,7 +1803,7 @@ static int test_hash_vs_generic_impl(const char *generic_driver,
 		generate_random_testvec_config(cfg, cfgname, sizeof(cfgname));
 
 		err = test_hash_vec_cfg(&vec, vec_name, cfg,
-					req, desc, tsgl, hashstate);
+					req, desc, tsgl, hashstate, "generic");
 		if (err)
 			goto out;
 		cond_resched();
@@ -1791,7 +1866,8 @@ static int alloc_shash(const char *driver, u32 type, u32 mask,
 static int __alg_test_hash(const struct hash_testvec *vecs,
 			   unsigned int num_vecs, const char *driver,
 			   u32 type, u32 mask,
-			   const char *generic_driver, unsigned int maxkeysize)
+			   const char *generic_driver, unsigned int maxkeysize,
+			   const char *test_name)
 {
 	struct crypto_ahash *atfm = NULL;
 	struct ahash_request *req = NULL;
@@ -1857,7 +1933,7 @@ static int __alg_test_hash(const struct hash_testvec *vecs,
 		if (fips_enabled && vecs[i].fips_skip)
 			continue;
 
-		err = test_hash_vec(&vecs[i], i, req, desc, tsgl, hashstate);
+		err = test_hash_vec(&vecs[i], i, req, desc, tsgl, hashstate, test_name);
 		if (err)
 			goto out;
 		cond_resched();
@@ -1881,6 +1957,7 @@ static int alg_test_hash(const struct alg_test_desc *desc, const char *driver,
 			 u32 type, u32 mask)
 {
 	const struct hash_testvec *template = desc->suite.hash.vecs;
+	const char *test_name = desc->alg;
 	unsigned int tcount = desc->suite.hash.count;
 	unsigned int nr_unkeyed, nr_keyed;
 	unsigned int maxkeysize = 0;
@@ -1909,13 +1986,13 @@ static int alg_test_hash(const struct alg_test_desc *desc, const char *driver,
 	err = 0;
 	if (nr_unkeyed) {
 		err = __alg_test_hash(template, nr_unkeyed, driver, type, mask,
-				      desc->generic_driver, maxkeysize);
+				      desc->generic_driver, maxkeysize, test_name);
 		template += nr_unkeyed;
 	}
 
 	if (!err && nr_keyed)
 		err = __alg_test_hash(template, nr_keyed, driver, type, mask,
-				      desc->generic_driver, maxkeysize);
+				      desc->generic_driver, maxkeysize, test_name);
 
 	return err;
 }
@@ -3812,6 +3889,7 @@ static int alg_test_drbg(const struct alg_test_desc *desc, const char *driver,
 }
 
 static int do_test_kpp(struct crypto_kpp *tfm, const struct kpp_testvec *vec,
+		       bool fips_logging,
 		       const char *alg)
 {
 	struct kpp_request *req;
@@ -3824,6 +3902,11 @@ static int do_test_kpp(struct crypto_kpp *tfm, const struct kpp_testvec *vec,
 	unsigned int out_len_max;
 	int err = -ENOMEM;
 	struct scatterlist src, dst;
+	const char *driver = crypto_tfm_alg_driver_name(crypto_kpp_tfm(tfm));
+	const char *algo_name = kpp_alg_name(tfm);
+	/* test_name is passed here as alg. */
+	const char *test_name = alg;
+	const char *op_name = vec->genkey ? "generate" : "verify";
 
 	req = kpp_request_alloc(tfm, GFP_KERNEL);
 	if (!req)
@@ -3841,6 +3924,16 @@ static int do_test_kpp(struct crypto_kpp *tfm, const struct kpp_testvec *vec,
 		err = -ENOMEM;
 		goto free_req;
 	}
+
+	if (fips_logging) {
+		pr_info("%s:%d:FIPS.POST:%s:%s:%s_%s:START\n",
+			__FILE__,
+			__LINE__,
+			driver,
+			algo_name,
+			test_name,
+			op_name);
+        }
 
 	/* Use appropriate parameter as base */
 	kpp_request_set_input(req, NULL, 0);
@@ -3880,6 +3973,16 @@ static int do_test_kpp(struct crypto_kpp *tfm, const struct kpp_testvec *vec,
 	if (!input_buf) {
 		err = -ENOMEM;
 		goto free_output;
+	}
+
+	if (fips_logging &&
+		fips_request_failure(driver,
+				algo_name,
+				test_name,
+				0,
+				op_name)) {
+		char *cp = (char *)input_buf;
+		cp[0] ^= 1;
 	}
 
 	sg_init_one(&src, input_buf, vec->b_public_size);
@@ -3937,9 +4040,28 @@ static int do_test_kpp(struct crypto_kpp *tfm, const struct kpp_testvec *vec,
 	 */
 	if (memcmp(shared_secret, sg_virt(req->dst),
 		   vec->expected_ss_size)) {
+		if (fips_logging) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%s:END_FAIL\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name,
+				op_name);
+		}
 		pr_err("alg: %s: compute shared secret test failed. Invalid output\n",
 		       alg);
 		err = -EINVAL;
+	}
+
+	if (fips_logging) {
+		pr_info("%s:%d:FIPS.POST:%s:%s:%s_%s:END_SUCCESS\n",
+			__FILE__,
+			__LINE__,
+			driver,
+			algo_name,
+			test_name,
+			op_name);
 	}
 
 free_all:
@@ -3957,9 +4079,16 @@ static int test_kpp(struct crypto_kpp *tfm, const char *alg,
 		    const struct kpp_testvec *vecs, unsigned int tcount)
 {
 	int ret, i;
+	bool fips_logging = fips_enabled;
 
 	for (i = 0; i < tcount; i++) {
-		ret = do_test_kpp(tfm, vecs++, alg);
+		if (vecs->genkey == true) {
+			/* Log key generation. */
+			fips_logging = fips_enabled;
+		}
+		ret = do_test_kpp(tfm, vecs++, fips_logging, alg);
+		/* Only log the first vector. */
+		fips_logging = false;
 		if (ret) {
 			pr_err("alg: %s: test failed on vector %d, err=%d\n",
 			       alg, i + 1, ret);
