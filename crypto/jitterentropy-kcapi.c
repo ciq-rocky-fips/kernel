@@ -184,18 +184,71 @@ static struct rng_alg jent_alg = {
 	}
 };
 
+const char *map_jent_entropy_init_error_to_str(int err)
+{
+	if (err == JENT_ENOTIME) {
+		return "Timer service not available";
+	} else if (err == JENT_ECOARSETIME) {
+		return "Timer too coarse for RNG";
+	} else if (err == JENT_ENOMONOTONIC) {
+		return "Timer is not monotonic increasing";
+	} else if (err == JENT_EVARVAR) {
+		return "Timer does not produce variations of variations";
+	} else if (err == JENT_ESTUCK) {
+		return "Too many stuck results during initialization";
+	} else if (err == JENT_EHEALTH) {
+		return "Health test failed during initialization";
+	} else if (err == JENT_ERCT) {
+		return "RCT failed during initialization";
+	} else {
+		return "Unknown error";
+	}
+}
+
 static int __init jent_mod_init(void)
 {
 	int ret = 0;
+	enum fips_failprobe fips_fail_probe = FIPS_NOFAIL;
 
-	ret = jent_entropy_init();
+	if (fips_enabled) {
+		pr_info("%s:%d:FIPS.POST:jitter_entropy_KAT:START\n", __FILE__, __LINE__);
+		/* Find out if we're asked to fail somewhere. */
+		if (fips_request_failure("jitter",
+					 "entropy",
+					 "stuck",
+					 0,
+					 "")) {
+			fips_fail_probe = FIPS_FAIL_STUCK;
+		} else if (fips_request_failure("jitter",
+					 "entropy",
+					 "repetition",
+					 0,
+					 "")) {
+			fips_fail_probe = FIPS_FAIL_REPETITION_COUNT;
+		} else if (fips_request_failure("jitter",
+					 "entropy",
+					 "adaptive_proportion",
+					 0,
+					 "")) {
+			fips_fail_probe = FIPS_FAIL_ADAPTIVE_PROPORTION;
+		}
+	}
+	ret = jent_entropy_init(fips_fail_probe);
 	if (ret) {
-		/* Handle permanent health test error */
-		if (fips_enabled)
-			panic("jitterentropy: Initialization failed with host not compliant with requirements: %d\n", ret);
-
+		if (fips_enabled) {
+			pr_info("%s:%d:FIPS.POST:jitter_entropy_KAT:%s:END_FAIL\n",
+				__FILE__,
+				__LINE__,
+				map_jent_entropy_init_error_to_str(ret));
+		}
 		pr_info("jitterentropy: Initialization failed with host not compliant with requirements: %d\n", ret);
+		if (fips_enabled) {
+			 panic("jitter_entropy: Initialization self test failed in fips mode!\n");
+		}
 		return -EFAULT;
+	}
+	if (fips_enabled) {
+		pr_info("%s:%d:FIPS.POST:jitter_entropy_KAT:END_SUCCESS\n",  __FILE__, __LINE__);
 	}
 	return crypto_register_rng(&jent_alg);
 }

@@ -108,16 +108,6 @@ struct rand_data {
 					   * entropy, saves MEMORY_SIZE RAM for
 					   * entropy collector */
 
-/* -- error codes for init function -- */
-#define JENT_ENOTIME		1 /* Timer service not available */
-#define JENT_ECOARSETIME	2 /* Timer too coarse for RNG */
-#define JENT_ENOMONOTONIC	3 /* Timer is not monotonic increasing */
-#define JENT_EVARVAR		5 /* Timer does not produce variations of
-				   * variations (2nd derivation of time is
-				   * zero). */
-#define JENT_ESTUCK		8 /* Too many stuck results during init. */
-#define JENT_EHEALTH		9 /* Health test failed during initialization */
-
 /*
  * The output n bits can receive more than n bits of min entropy, of course,
  * but the fixed output of the conditioning function can only asymptotically
@@ -604,7 +594,7 @@ int jent_read_entropy(struct rand_data *ec, unsigned char *data,
 			 * Perform startup health tests and return permanent
 			 * error if it fails.
 			 */
-			if (jent_entropy_init())
+			if (jent_entropy_init(FIPS_NOFAIL))
 				return -3;
 
 			return -2;
@@ -668,7 +658,7 @@ void jent_entropy_collector_free(struct rand_data *entropy_collector)
 	jent_zfree(entropy_collector);
 }
 
-int jent_entropy_init(void)
+int jent_entropy_init(enum fips_failprobe fips_fail_probe)
 {
 	int i;
 	__u64 delta_sum = 0;
@@ -764,6 +754,14 @@ int jent_entropy_init(void)
 			}
 		}
 
+		if (fips_fail_probe == FIPS_FAIL_REPETITION_COUNT) {
+			ec.rct_count = -1;
+		}
+
+		if (fips_fail_probe == FIPS_FAIL_ADAPTIVE_PROPORTION) {
+			ec.apt_count = JENT_APT_CUTOFF_PERMANENT;
+		}
+
 		/* Validate health test result */
 		if (jent_health_failure(&ec))
 			return JENT_EHEALTH;
@@ -815,6 +813,11 @@ int jent_entropy_init(void)
 	 */
 	if ((TESTLOOPCOUNT/10 * 9) < count_mod)
 		return JENT_ECOARSETIME;
+
+	if (fips_fail_probe == FIPS_FAIL_STUCK) {
+		/* Caller requested we fail the stuck count. */
+		count_stuck = TESTLOOPCOUNT;
+	}
 
 	/*
 	 * If we have more than 90% stuck results, then this Jitter RNG is
