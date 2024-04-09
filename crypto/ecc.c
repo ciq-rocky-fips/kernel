@@ -1577,18 +1577,38 @@ EXPORT_SYMBOL(ecc_is_pubkey_valid_partial);
 int ecc_is_pubkey_valid_full(const struct ecc_curve *curve,
 			     struct ecc_point *pk)
 {
+	int ret;
 	struct ecc_point *nQ;
 
+	if (fips_enabled) {
+		pr_info("%s:%d:FIPS.PCT:%s:%s:%s:START\n",
+		       __FILE__,
+		       __LINE__,
+		       "ecdh",
+		       curve->name,
+		       "public_key");
+
+		if (fips_request_failure("ecdh",
+					 curve->name,
+					 "public_key",
+					 0,
+					 "validation")) {
+			*pk->x ^= 0x1;
+		}
+	}
+
 	/* Checks 1 through 3 */
-	int ret = ecc_is_pubkey_valid_partial(curve, pk);
+	ret = ecc_is_pubkey_valid_partial(curve, pk);
 
 	if (ret)
-		return ret;
+		goto out;
 
 	/* Check 4: Verify that nQ is the zero point. */
 	nQ = ecc_alloc_point(pk->ndigits);
-	if (!nQ)
-		return -ENOMEM;
+	if (!nQ) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	ecc_point_mult(nQ, pk, curve->n, NULL, curve, pk->ndigits);
 	if (!ecc_point_is_zero(nQ))
@@ -1596,6 +1616,25 @@ int ecc_is_pubkey_valid_full(const struct ecc_curve *curve,
 
 	ecc_free_point(nQ);
 
+  out:
+
+	if (fips_enabled) {
+		if (ret == 0) {
+			pr_info("%s:%d:FIPS.PCT:%s:%s:%s:END_SUCCESS\n",
+			       __FILE__,
+			       __LINE__,
+			       "ecdh",
+			       curve->name,
+			       "public_key");
+		} else {
+			pr_info("%s:%d:FIPS.PCT:%s:%s:%s:END_FAIL\n",
+			       __FILE__,
+			       __LINE__,
+			       "ecdh",
+			       curve->name,
+			       "public_key");
+		}
+	}
 	return ret;
 }
 EXPORT_SYMBOL(ecc_is_pubkey_valid_full);
