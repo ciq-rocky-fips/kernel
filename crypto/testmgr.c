@@ -2001,7 +2001,10 @@ static int test_aead_vec_cfg(int enc, const struct aead_testvec *vec,
 			     const char *vec_name,
 			     const struct testvec_config *cfg,
 			     struct aead_request *req,
-			     struct cipher_test_sglists *tsgls)
+			     struct cipher_test_sglists *tsgls,
+			     bool fips_logging_thistime,
+			     const char *algo_name,
+			     const char *test_name)
 {
 	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
 	const unsigned int alignmask = crypto_aead_alignmask(tfm);
@@ -2067,6 +2070,30 @@ static int test_aead_vec_cfg(int enc, const struct aead_testvec *vec,
 	input[0].iov_len = vec->alen;
 	input[1].iov_base = enc ? (void *)vec->ptext : (void *)vec->ctext;
 	input[1].iov_len = enc ? vec->plen : vec->clen;
+	if (fips_logging_thistime) {
+		if (fips_request_failure(driver,
+					algo_name,
+					test_name,
+					(unsigned)vec->klen * 8,
+					op)) {
+			char *cp;
+			if (enc && vec->plen != 0) {
+				/* Corrupt plaintext input. */
+				cp = (char *)input[1].iov_base;
+			} else if (!enc && vec->clen != 0) {
+				/* Corrupt ciphertext input. */
+				cp = (char *)input[1].iov_base;
+			} else if (vec->alen != 0) {
+				/* Corrupt assoc. */
+				cp = (char *)input[0].iov_base;
+			} else {
+				/* Corrupt IV. */
+				cp = (char *)iv;
+			}
+			cp[0] ^= 1;
+		}
+	}
+
 	err = build_cipher_test_sglists(tsgls, cfg, alignmask,
 					vec->alen + (enc ? vec->plen :
 						     vec->clen),
@@ -2182,11 +2209,22 @@ static int test_aead_vec_cfg(int enc, const struct aead_testvec *vec,
 
 static int test_aead_vec(int enc, const struct aead_testvec *vec,
 			 unsigned int vec_num, struct aead_request *req,
-			 struct cipher_test_sglists *tsgls)
+			 struct cipher_test_sglists *tsgls,
+			 const char *test_name,
+			 unsigned int tcount,
+			 unsigned int *keysize_logged)
 {
 	char vec_name[16];
 	unsigned int i;
 	int err;
+	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
+	/* algo here is really the driver name. */
+ 	const char *algo = crypto_tfm_alg_driver_name(crypto_aead_tfm(tfm));
+	const char *driver = algo;
+	const char *algo_name = crypto_tfm_alg_name(crypto_aead_tfm(tfm));
+	bool fips_logging_enabled = false;
+	bool fips_logging_thistime = false;
+	const char *e = (enc == ENCRYPT) ? "encryption" : "decryption";
 
 	if (enc && vec->novrfy)
 		return 0;
@@ -2194,11 +2232,76 @@ static int test_aead_vec(int enc, const struct aead_testvec *vec,
 	sprintf(vec_name, "%u", vec_num);
 
 	for (i = 0; i < ARRAY_SIZE(default_cipher_testvec_configs); i++) {
+		if (fips_enabled) {
+			/*
+			 * We only need to log one config
+			 * otherwise we flood the logs.
+			 */
+			if (i == 0) {
+				fips_logging_enabled = true;
+			}
+		}
+
+		/* Only log for each new keysize. */
+		if (fips_logging_enabled) {
+			unsigned int ctr;
+			for (ctr = 0; keysize_logged[ctr] != 0 && ctr < tcount; ctr++) {
+				if (keysize_logged[ctr] == vec->klen) {
+					/* We already logged this keysize. */
+					fips_logging_thistime = false;
+					break;
+				}
+			}
+			if (ctr == tcount) {
+				/* This can never happen. */
+				return -EINVAL;
+			}
+			if (keysize_logged[ctr] == 0) {
+				/* Remember we are logging this keysize. */
+				keysize_logged[ctr] = vec->klen;
+				fips_logging_thistime = true;
+			}
+		}
+		
+		if (fips_logging_thistime) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:START\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name,
+				(unsigned)vec->klen * 8,
+				e);
+		}
+
 		err = test_aead_vec_cfg(enc, vec, vec_name,
 					&default_cipher_testvec_configs[i],
-					req, tsgls);
-		if (err)
+					req, tsgls, fips_logging_thistime,
+					algo_name, test_name);
+		if (err) {
+			if (fips_logging_thistime) {
+				pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_FAIL\n",
+					__FILE__,
+					__LINE__,
+					driver,
+					algo_name,
+					test_name,
+					(unsigned)vec->klen * 8,
+					e);
+			}
 			return err;
+		}
+		
+		if (fips_logging_thistime) {
+			pr_info("%s:%d:FIPS.POST:%s:%s:%s_%u_%s:END_SUCCESS\n",
+				__FILE__,
+				__LINE__,
+				driver,
+				algo_name,
+				test_name,
+				(unsigned)vec->klen * 8,
+				e);
+		}
 	}
 
 #ifdef CONFIG_CRYPTO_MANAGER_EXTRA_TESTS
@@ -2210,7 +2313,7 @@ static int test_aead_vec(int enc, const struct aead_testvec *vec,
 			generate_random_testvec_config(&cfg, cfgname,
 						       sizeof(cfgname));
 			err = test_aead_vec_cfg(enc, vec, vec_name,
-						&cfg, req, tsgls);
+						&cfg, req, tsgls, 0, NULL, NULL);
 			if (err)
 				return err;
 			cond_resched();
@@ -2432,7 +2535,7 @@ static int test_aead_inauthentic_inputs(struct aead_extra_tests_ctx *ctx)
 						       sizeof(ctx->cfgname));
 			err = test_aead_vec_cfg(DECRYPT, &ctx->vec,
 						ctx->vec_name, &ctx->cfg,
-						ctx->req, ctx->tsgls);
+						ctx->req, ctx->tsgls, 0, NULL, NULL);
 			if (err)
 				return err;
 		}
@@ -2528,14 +2631,14 @@ static int test_aead_vs_generic_impl(struct aead_extra_tests_ctx *ctx)
 		if (!ctx->vec.novrfy) {
 			err = test_aead_vec_cfg(ENCRYPT, &ctx->vec,
 						ctx->vec_name, &ctx->cfg,
-						ctx->req, ctx->tsgls);
+						ctx->req, ctx->tsgls, 0, NULL, NULL);
 			if (err)
 				goto out;
 		}
 		if (ctx->vec.crypt_error == 0 || ctx->vec.novrfy) {
 			err = test_aead_vec_cfg(DECRYPT, &ctx->vec,
 						ctx->vec_name, &ctx->cfg,
-						ctx->req, ctx->tsgls);
+						ctx->req, ctx->tsgls, 0, NULL, NULL);
 			if (err)
 				goto out;
 		}
@@ -2608,17 +2711,26 @@ static int test_aead_extra(const struct alg_test_desc *test_desc,
 
 static int test_aead(int enc, const struct aead_test_suite *suite,
 		     struct aead_request *req,
-		     struct cipher_test_sglists *tsgls)
+		     struct cipher_test_sglists *tsgls,
+		     const char *test_name)
 {
 	unsigned int i;
 	int err;
+	unsigned int *keysize_logged = NULL;
+	
+	keysize_logged = kcalloc(suite->count, sizeof(unsigned int), GFP_KERNEL);
+	if (keysize_logged == NULL) {
+		return -ENOMEM;
+	}
 
 	for (i = 0; i < suite->count; i++) {
-		err = test_aead_vec(enc, &suite->vecs[i], i, req, tsgls);
+		err = test_aead_vec(enc, &suite->vecs[i], i, req, tsgls,
+				    test_name, suite->count, keysize_logged);
 		if (err)
 			return err;
 		cond_resched();
 	}
+	kfree(keysize_logged);
 	return 0;
 }
 
@@ -2660,11 +2772,11 @@ static int alg_test_aead(const struct alg_test_desc *desc, const char *driver,
 		goto out;
 	}
 
-	err = test_aead(ENCRYPT, suite, req, tsgls);
+	err = test_aead(ENCRYPT, suite, req, tsgls, desc->alg);
 	if (err)
 		goto out;
 
-	err = test_aead(DECRYPT, suite, req, tsgls);
+	err = test_aead(DECRYPT, suite, req, tsgls, desc->alg);
 	if (err)
 		goto out;
 
