@@ -658,15 +658,6 @@ void crypto_req_done(struct crypto_async_request *req, int err)
 }
 EXPORT_SYMBOL_GPL(crypto_req_done);
 
-// JRATEST
-#define JRATEST 1
-
-#if defined(JRATEST)
-/* Test code to prevent logging overflow. */
-static char *stored_fail_param;
-static bool lastret;
-#endif
-
 bool fips_request_failure(const char *driver,
 			  const char *algo_name,
 			  const char *test_name,
@@ -735,27 +726,11 @@ bool fips_request_failure(const char *driver,
 		fail_param[strlen(fail_param)-1] = '\0';
 	}
 
-#if defined(JRATEST)
-	if (stored_fail_param != NULL && (strcmp(fail_param, stored_fail_param) == 0)) {
-		return lastret;
-	}
-
-	pr_info("JRATEST: looking for |%s|\n", fail_param);
-#endif
-
 	if (cmdline_find_option_bool(saved_command_line, fail_param)) {
 		pr_info("FIPS REQUEST FAIL: %s\n", fail_param);
 		ret = true;
 	}
-#if defined(JRATEST)
-	if (stored_fail_param != NULL) {
-		kfree(stored_fail_param);
-	}
-	stored_fail_param = fail_param;
-	lastret = ret;
-#else
 	kfree(fail_param);
-#endif
 	return ret;
 }
 EXPORT_SYMBOL_GPL(fips_request_failure);
