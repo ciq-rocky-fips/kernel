@@ -1,0 +1,80 @@
+From d507c19b4421ae02100287d6ebb6f0c724dc9918 Mon Sep 17 00:00:00 2001
+From: Jeremy Allison <jallison@ciq.com>
+Date: Thu, 11 Apr 2024 14:46:50 -0700
+Subject: [PATCH 1/2] Fix const warnings for gcc 11.4.1
+
+---
+ drivers/tty/serial/serial_core.c | 2 +-
+ drivers/tty/tty_ioctl.c          | 2 +-
+ include/linux/tty.h              | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/tty/serial/serial_core.c b/drivers/tty/serial/serial_core.c
+index a786e2adf..8db017693 100644
+--- a/drivers/tty/serial/serial_core.c
++++ b/drivers/tty/serial/serial_core.c
+@@ -428,7 +428,7 @@ uart_get_baud_rate(struct uart_port *port, struct ktermios *termios,
+ 		 */
+ 		termios->c_cflag &= ~CBAUD;
+ 		if (old) {
+-			baud = tty_termios_baud_rate(old);
++			baud = tty_termios_baud_rate((struct ktermios *)old);
+ 			if (!hung_up)
+ 				tty_termios_encode_baud_rate(termios,
+ 								baud, baud);
+diff --git a/drivers/tty/tty_ioctl.c b/drivers/tty/tty_ioctl.c
+index b4db794a7..089501a2a 100644
+--- a/drivers/tty/tty_ioctl.c
++++ b/drivers/tty/tty_ioctl.c
+@@ -249,7 +249,7 @@ static void unset_locked_termios(struct tty_struct *tty, const struct ktermios *
+  *	in some cases where only minimal reconfiguration is supported
+  */
+ 
+-void tty_termios_copy_hw(struct ktermios *new, struct ktermios *old)
++void tty_termios_copy_hw(struct ktermios *new, const struct ktermios *old)
+ {
+ 	/* The bits a dumb device handles in software. Smart devices need
+ 	   to always provide a set_termios method */
+diff --git a/include/linux/tty.h b/include/linux/tty.h
+index 33572a5a5..77e93dd9c 100644
+--- a/include/linux/tty.h
++++ b/include/linux/tty.h
+@@ -498,7 +498,7 @@ static inline speed_t tty_get_baud_rate(struct tty_struct *tty)
+ unsigned char tty_get_char_size(unsigned int cflag);
+ unsigned char tty_get_frame_size(unsigned int cflag);
+ 
+-extern void tty_termios_copy_hw(struct ktermios *new, struct ktermios *old);
++extern void tty_termios_copy_hw(struct ktermios *new, const struct ktermios *old);
+ extern int tty_termios_hw_change(const struct ktermios *a, const struct ktermios *b);
+ extern int tty_set_termios(struct tty_struct *tty, struct ktermios *kt);
+ 
+-- 
+2.39.3
+
+
+From 0c1cb0c212c6ddb966a86a52c596a4e144bfcc31 Mon Sep 17 00:00:00 2001
+From: Jeremy Allison <jallison@ciq.com>
+Date: Thu, 11 Apr 2024 14:47:24 -0700
+Subject: [PATCH 2/2] Turn off errors for array bounds with gcc 11.4.1
+
+---
+ init/Kconfig | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/init/Kconfig b/init/Kconfig
+index 3ffe81f1e..43e61c653 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -889,7 +889,8 @@ config GCC12_NO_ARRAY_BOUNDS
+ 
+ config CC_NO_ARRAY_BOUNDS
+ 	bool
+-	default y if CC_IS_GCC && GCC_VERSION >= 120000 && GCC_VERSION < 130000 && GCC12_NO_ARRAY_BOUNDS
++	default y
++#	default y if CC_IS_GCC && GCC_VERSION >= 120000 && GCC_VERSION < 130000 && GCC12_NO_ARRAY_BOUNDS
+ 
+ #
+ # For architectures that know their GCC __int128 support is sound
+-- 
+2.39.3
+
