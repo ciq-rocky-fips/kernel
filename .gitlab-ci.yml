@@ -1,0 +1,77 @@
+---
+# This CI will only work for trusted contributors. CI for public contributors
+# runs via a webhook on the merge requests. There's nothing you have to do if
+# you want your changes tested -- created pipelines will be automatically
+# linked in the merge request and appropriate labels will be added to it.
+# Changes to this file will NOT be reflected in the testing.
+
+include:
+  - project: cki-project/pipeline-definition
+    ref: production
+    file: kernel_templates.yml
+
+workflow: !reference [.workflow]
+
+# Basic bridge job
+.trigger:
+  trigger:
+    branch: rhel8
+  variables:
+    builder_image: quay.io/cki/builder-rhel8
+    name: kernel-rhel8
+    architectures: 'x86_64 ppc64le aarch64 s390x'
+    debug_architectures: 'x86_64 ppc64le aarch64 s390x'
+    native_tools: 'true'
+    disttag_override: '.el8_10'
+
+# Realtime specific configuration
+.realtime_check:
+  allow_failure: false
+  trigger:
+    branch: rhel8-rt
+  variables:
+    builder_image: quay.io/cki/builder-rhel8
+    name: kernel-rt-rhel8
+    pipeline_name_suffix: ''
+    disttag_override: '.el8_10'
+
+# Full RT pipeline for -rt branch
+.realtime_full:
+  trigger:
+    branch: rhel8
+  variables:
+    builder_image: quay.io/cki/builder-rhel8
+    name: kernel-rt-rhel8
+    disttag_override: '.el8_10'
+    RUN_ONLY_FOR_RT: 'true'
+
+# regular pipelines
+rhel8_merge_request:
+  extends: [.internal, .merge_request, .with_notifications, .rhel_common,
+            .trigger]
+
+rhel8_realtime_check_merge_request:
+  extends: [.internal, .merge_request, .realtime_check_common,
+            .realtime_check]
+
+rhel8_baseline_coverage_build:
+  extends: [.internal, .baseline, .rhel_common, .only_build_and_publish, .coverage,
+            .trigger]
+
+# realtime branch pipelines
+rhel8_realtime_merge_request:
+  extends: [.internal, .merge_request, .with_notifications, .realtime_pipeline_common,
+            .realtime_full]
+
+# private pipelines
+rhel8_merge_request_private:
+  extends: [.scratch, .merge_request, .rhel_common,
+            .trigger]
+
+rhel8_realtime_check_merge_request_private:
+  extends: [.scratch, .merge_request, .realtime_check_common,
+            .realtime_check]
+
+rhel8_realtime_merge_request_private:
+  extends: [.scratch, .merge_request, .realtime_pipeline_common,
+            .realtime_full]
